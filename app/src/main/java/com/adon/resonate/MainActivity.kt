@@ -1,12 +1,19 @@
 package com.adon.resonate
 
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,9 +35,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.adon.resonate.ui.theme.ResonateTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -45,17 +54,37 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             ResonateTheme {
-                ToneScreen()
+                MicLoopScreen()
             }
         }
     }
 }
 
 @Composable
-fun ToneScreen() {
-    var playing by remember { mutableStateOf(false) }
+fun MicLoopScreen() {
+    var running by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
+
+    val context = LocalContext.current
+    val isPermissionGranted = remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        isPermissionGranted.value = isGranted
+        if (isGranted) {
+            running = true
+            scope.launch { startMicLoopback() }
+        }
+        else {
+            Toast.makeText(context, "Microphone permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     MaterialTheme{
         Surface(modifier = Modifier.fillMaxSize()) {
@@ -65,71 +94,90 @@ fun ToneScreen() {
             ) {
                 Button(
                     onClick = {
-                        if (!playing) {
-                            playing = true
-                            scope.launch { playTone() }
+                        if (!running) {
+                            permissionLauncher.launch(android.Manifest.permission.RECORD_AUDIO)
                         } else {
-                            playing = false
+                            running = false
                             isPlaying = false
                         }
                     }
                 ) {
-                    Text(if (playing) "Stop Tone" else "Play 440 Hz Tone")
+                    Text(if (running) "Stop Mic Loop" else "Start Mic Loop")
                 }
             }
         }
     }
 }
 
-var audioTrack: AudioTrack? = null
+var track: AudioTrack? = null
 var isPlaying = false
-suspend fun playTone() = withContext(Dispatchers.IO ) {
+@androidx.annotation.RequiresPermission(android.Manifest.permission.RECORD_AUDIO)
+suspend fun startMicLoopback() = withContext(Dispatchers.IO ) {
     val sampleRate = 48000
-    val frequency = 440.0
-    val amplitude = 0.3
+    val channelIn = AudioFormat.CHANNEL_IN_MONO
+    val channelOut = AudioFormat.CHANNEL_OUT_MONO
+    val format = AudioFormat.ENCODING_PCM_16BIT
 
-    val bufferSize = 960 //20ms buffer
-    val buffer = ShortArray(bufferSize)
+    val minRecBuf = AudioRecord.getMinBufferSize(sampleRate, channelIn, format)
+    val minPlayBuf = AudioTrack.getMinBufferSize(sampleRate, channelOut, format)
 
-    audioTrack = AudioTrack.Builder()
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                .build()
-        )
+    val record = AudioRecord.Builder()
+        .setAudioSource(MediaRecorder.AudioSource.MIC)
         .setAudioFormat(
             AudioFormat.Builder()
-                .setSampleRate(sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .setSampleRate(sampleRate)
+                .setEncoding(format)
+                .setChannelMask(channelIn)
                 .build()
         )
-        .setBufferSizeInBytes(bufferSize * 2)
+        .setBufferSizeInBytes(minRecBuf * 2)
+        .build()
+
+    track = AudioTrack.Builder()
+        .setAudioFormat(
+            AudioFormat.Builder()
+                .setSampleRate(sampleRate)
+                .setEncoding(format)
+                .setChannelMask(channelOut)
+                .build()
+        )
+        .setBufferSizeInBytes(minPlayBuf * 2)
         .setTransferMode(AudioTrack.MODE_STREAM)
         .build()
 
-    audioTrack?.play()
+    val buffer = ShortArray(2048)
+
+    record.startRecording()
+    track?.play()
     isPlaying = true
 
-    var phase = 0.0
-    val increment = 2.0 * Math.PI * frequency / sampleRate
-    while (isPlaying) {
-        for (i in buffer.indices) {
-            buffer[i] = (sin(phase) * amplitude * Short.MAX_VALUE).toInt().toShort()
-            phase += increment
-            if (phase > 2 * PI) phase -= 2 * PI
+    try {
+        while(isPlaying) {
+            val read = record.read(buffer, 0, buffer.size)
+            if (read > 0) {
+                track?.write(buffer, 0, read)
+            }
         }
-        audioTrack?.write(buffer, 0, bufferSize)
+    } catch (e: Exception) {
+        e.printStackTrace()
+    } finally {
+        if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+            record.stop()
+        }
+        record.release()
+
+        if (track?.playState == AudioTrack.PLAYSTATE_PLAYING) {
+            track?.stop()
+        }
+        track?.release()
+        track = null
     }
-    audioTrack?.stop()
-    audioTrack?.release()
-    audioTrack = null
 }
 
 @Preview(showBackground = true)
 @Composable
 fun GreetingPreview() {
     ResonateTheme {
-        ToneScreen()
+        MicLoopScreen()
     }
 }
