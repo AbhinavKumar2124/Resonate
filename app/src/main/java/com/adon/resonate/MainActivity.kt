@@ -1,5 +1,8 @@
 package com.adon.resonate
 
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -33,6 +36,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.URL
+import kotlin.math.PI
+import kotlin.math.sin
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,16 +45,15 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             ResonateTheme {
-                JsonFetchScreen()
+                ToneScreen()
             }
         }
     }
 }
 
 @Composable
-fun JsonFetchScreen() {
-    var result by remember { mutableStateOf("Press button to fetch JSON") }
-    var loading by remember { mutableStateOf(false) }
+fun ToneScreen() {
+    var playing by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -59,34 +63,73 @@ fun JsonFetchScreen() {
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(result, fontSize = 20.sp)
-                Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        scope.launch {
-                            loading = true
-                            result = fetchJson()
-                            loading = false
+                        if (!playing) {
+                            playing = true
+                            scope.launch { playTone() }
+                        } else {
+                            playing = false
+                            isPlaying = false
                         }
-                    },
-                    enabled = !loading
+                    }
                 ) {
-                    Text(if(loading) "Loading..." else "Fetch JSON")
+                    Text(if (playing) "Stop Tone" else "Play 440 Hz Tone")
                 }
             }
         }
     }
 }
-suspend fun fetchJson(): String {
-    return withContext(Dispatchers.IO ) {
-        URL("https://jsonplaceholder.typicode.com/todos/1").readText()
+
+var audioTrack: AudioTrack? = null
+var isPlaying = false
+suspend fun playTone() = withContext(Dispatchers.IO ) {
+    val sampleRate = 48000
+    val frequency = 440.0
+    val amplitude = 0.3
+
+    val bufferSize = 960 //20ms buffer
+    val buffer = ShortArray(bufferSize)
+
+    audioTrack = AudioTrack.Builder()
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+        )
+        .setAudioFormat(
+            AudioFormat.Builder()
+                .setSampleRate(sampleRate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+        )
+        .setBufferSizeInBytes(bufferSize * 2)
+        .setTransferMode(AudioTrack.MODE_STREAM)
+        .build()
+
+    audioTrack?.play()
+    isPlaying = true
+
+    var phase = 0.0
+    val increment = 2.0 * Math.PI * frequency / sampleRate
+    while (isPlaying) {
+        for (i in buffer.indices) {
+            buffer[i] = (sin(phase) * amplitude * Short.MAX_VALUE).toInt().toShort()
+            phase += increment
+            if (phase > 2 * PI) phase -= 2 * PI
+        }
+        audioTrack?.write(buffer, 0, bufferSize)
     }
+    audioTrack?.stop()
+    audioTrack?.release()
+    audioTrack = null
 }
 
 @Preview(showBackground = true)
 @Composable
 fun GreetingPreview() {
     ResonateTheme {
-        JsonFetchScreen()
+        ToneScreen()
     }
 }
